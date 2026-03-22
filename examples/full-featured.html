@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Full Featured - Twelve Data + JavaScript Stock Charts</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/day-trading-simulator/javascript-stock-charts@main/stock-chart.css">
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            padding: 20px;
+            background: #0a0a0f;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            color: #fff;
+        }
+        h1 { font-size: 1.4rem; margin-bottom: 4px; }
+        .subtitle { color: #888; margin-bottom: 16px; font-size: 0.9rem; }
+        .subtitle a { color: #22d3ee; }
+        .controls {
+            display: flex; gap: 10px; margin-bottom: 12px;
+            flex-wrap: wrap; align-items: flex-end;
+        }
+        .controls label {
+            display: block; font-size: 0.7rem;
+            text-transform: uppercase; letter-spacing: 1px;
+            color: #888; margin-bottom: 4px;
+        }
+        .controls input {
+            background: #16161f; border: 1px solid #333;
+            color: #fff; padding: 8px 12px; font-size: 0.9rem;
+            border-radius: 2px;
+        }
+        .controls button {
+            background: #10b981; border: none; color: #fff;
+            padding: 8px 24px; font-weight: 700; cursor: pointer;
+            border-radius: 2px;
+        }
+        .controls button:hover { background: #059669; }
+        .sc-chart-type-button.d-none { display: inline-flex !important; }
+        #status { font-size: 0.85rem; color: #888; margin-bottom: 8px; }
+        #status.error { color: #ef4444; }
+        .attribution { font-size: 13px; color: rgba(255,255,255,0.45); margin-top: 4px; }
+        .attribution a { color: rgba(255,255,255,0.6); text-decoration: none; }
+    </style>
+</head>
+<body>
+    <h1>Full Featured Example</h1>
+    <p class="subtitle">
+        <a href="https://twelvedata.com/" target="_blank">Twelve Data</a> +
+        <a href="https://github.com/day-trading-simulator/javascript-stock-charts" target="_blank">JavaScript Stock Charts</a>
+        with timeframe switching &amp; infinite scroll
+    </p>
+
+    <div class="controls">
+        <div>
+            <label>API Key</label>
+            <input type="text" id="apiKey" placeholder="Your Twelve Data API key" style="width:280px">
+        </div>
+        <div>
+            <label>Ticker</label>
+            <input type="text" id="ticker" value="AAPL" style="width:100px">
+        </div>
+        <button onclick="loadChart()">Load Chart</button>
+    </div>
+
+    <div id="status"></div>
+    <div id="chart" style="width:100%; height:500px;"></div>
+    <div class="attribution">Data provided by <a href="https://twelvedata.com/" target="_blank">Twelve Data</a></div>
+
+    <script src="https://cdn.jsdelivr.net/gh/day-trading-simulator/javascript-stock-charts@main/indicators.js"></script>
+    <script src="https://cdn.jsdelivr.net/gh/day-trading-simulator/javascript-stock-charts@main/patterns.js"></script>
+    <script src="https://cdn.jsdelivr.net/gh/day-trading-simulator/javascript-stock-charts@main/stock-chart.js"></script>
+    <script>
+        var chart = null;
+        var currentTicker = 'AAPL';
+        var previousTimeframe = '1day';
+        var timeframeCheckInterval = null;
+        var isLoadingMore = false;
+        var earliestTimestamp = null;
+        var hasMoreHistory = true;
+
+        // Map chart timeframes to Twelve Data interval + outputsize
+        function mapTimeframeToTwelveDataParams(tf) {
+            var map = {
+                '1min':   { interval: '1min',   outputsize: 500 },
+                '2min':   { interval: '5min',   outputsize: 500 },
+                '5min':   { interval: '5min',   outputsize: 500 },
+                '15min':  { interval: '15min',  outputsize: 500 },
+                '30min':  { interval: '30min',  outputsize: 500 },
+                '1hour':  { interval: '1h',     outputsize: 500 },
+                '60min':  { interval: '1h',     outputsize: 500 },
+                '4hour':  { interval: '4h',     outputsize: 500 },
+                '1day':   { interval: '1day',   outputsize: 500 },
+                '1week':  { interval: '1week',  outputsize: 260 },
+                '1W':     { interval: '1week',  outputsize: 260 },
+                '1month': { interval: '1month', outputsize: 120 },
+                '1M':     { interval: '1month', outputsize: 120 }
+            };
+            return map[tf] || map['1day'];
+        }
+
+        function transformTwelveData(json) {
+            return json.values.reverse().map(function(bar) {
+                var ts = new Date(bar.datetime).getTime();
+                var d = new Date(ts);
+                var date = d.toLocaleString('en-US', {
+                    timeZone: 'America/New_York',
+                    year: 'numeric', month: 'numeric', day: 'numeric',
+                    hour: '2-digit', minute: '2-digit', hour12: false
+                }).replace(',', '');
+                return {
+                    t: ts, date: date,
+                    open: parseFloat(bar.open), high: parseFloat(bar.high),
+                    low: parseFloat(bar.low), close: parseFloat(bar.close),
+                    volume: parseInt(bar.volume)
+                };
+            });
+        }
+
+        // Format end_date for infinite scroll
+        function formatEndDate(timestamp, interval) {
+            var d = new Date(timestamp - 1);
+            var endDate = d.getFullYear() + '-'
+                + String(d.getMonth() + 1).padStart(2, '0') + '-'
+                + String(d.getDate()).padStart(2, '0');
+            var intradayIntervals = ['1min','5min','15min','30min','45min','1h','2h','4h','8h'];
+            if (intradayIntervals.indexOf(interval) !== -1) {
+                endDate += ' ' + String(d.getHours()).padStart(2, '0') + ':'
+                    + String(d.getMinutes()).padStart(2, '0') + ':00';
+            }
+            return endDate;
+        }
+
+        // Fetch data from Twelve Data and render chart
+        async function loadChart() {
+            var apiKey = document.getElementById('apiKey').value.trim();
+            var ticker = document.getElementById('ticker').value.trim().toUpperCase();
+            var status = document.getElementById('status');
+
+            if (!apiKey) { status.textContent = 'Enter your Twelve Data API key.'; status.className = 'error'; return; }
+            if (!ticker) { status.textContent = 'Enter a ticker symbol.'; status.className = 'error'; return; }
+
+            var timeframe = (chart && chart.timeframe) ? chart.timeframe : '1day';
+            var p = mapTimeframeToTwelveDataParams(timeframe);
+
+            status.textContent = 'Fetching ' + timeframe + ' data from Twelve Data...';
+            status.className = '';
+
+            var url = 'https://api.twelvedata.com/time_series?symbol=' + ticker
+                + '&interval=' + p.interval
+                + '&outputsize=' + p.outputsize
+                + '&apikey=' + apiKey;
+
+            try {
+                var resp = await fetch(url);
+                var json = await resp.json();
+                if (json.status !== 'ok' || !json.values || json.values.length === 0) {
+                    status.textContent = json.message || 'No data for ' + ticker + '.';
+                    status.className = 'error'; return;
+                }
+
+                var chartData = transformTwelveData(json);
+                if (chart) chart.destroy();
+                if (timeframeCheckInterval) clearInterval(timeframeCheckInterval);
+
+                currentTicker = ticker;
+                chart = new StockChart('chart', {
+                    data: chartData, ticker: ticker,
+                    chartType: 'candlestick', darkMode: true,
+                    timeframe: timeframe,
+                    useAfterHoursStyling: true,
+                    onReachingStart: handleReachingStart
+                });
+
+                isLoadingMore = false;
+                hasMoreHistory = true;
+                earliestTimestamp = chartData[0].t;
+                previousTimeframe = chart.timeframe || timeframe;
+                setupTimeframeMonitor();
+
+                status.textContent = '';
+                status.className = '';
+            } catch (err) {
+                status.textContent = 'Network error: ' + err.message;
+                status.className = 'error';
+            }
+        }
+
+        // Monitor chart's built-in timeframe selector for changes
+        function setupTimeframeMonitor() {
+            if (timeframeCheckInterval) clearInterval(timeframeCheckInterval);
+            timeframeCheckInterval = setInterval(function() {
+                if (chart && chart.timeframe !== previousTimeframe) {
+                    previousTimeframe = chart.timeframe;
+                    loadChart();
+                }
+            }, 500);
+        }
+
+        // Infinite scroll - fetch older data when user pans to start
+        async function handleReachingStart() {
+            if (isLoadingMore || !hasMoreHistory || !earliestTimestamp) return;
+            isLoadingMore = true;
+            var apiKey = document.getElementById('apiKey').value.trim();
+            if (!apiKey) { isLoadingMore = false; return; }
+            try {
+                var p = mapTimeframeToTwelveDataParams(chart.timeframe || '1day');
+                var endDate = formatEndDate(earliestTimestamp, p.interval);
+                var url = 'https://api.twelvedata.com/time_series?symbol=' + currentTicker
+                    + '&interval=' + p.interval
+                    + '&outputsize=' + p.outputsize
+                    + '&end_date=' + encodeURIComponent(endDate)
+                    + '&apikey=' + apiKey;
+                var resp = await fetch(url);
+                var json = await resp.json();
+                if (json.status === 'ok' && json.values && json.values.length > 0) {
+                    var older = transformTwelveData(json);
+                    earliestTimestamp = older[0].t;
+                    chart.prependHistoricalData(older);
+                } else {
+                    hasMoreHistory = false;
+                    chart.setLoadingHistoricalData(false);
+                }
+            } catch(e) {
+                chart.setLoadingHistoricalData(false);
+            } finally {
+                isLoadingMore = false;
+            }
+        }
+    </script>
+</body>
+</html>
